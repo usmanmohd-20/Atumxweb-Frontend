@@ -13,6 +13,7 @@ import { DndContext } from '@dnd-kit/core'
 import Header from '../components/Header'
 import Sidebar from './Elements/Sidebar'
 import TopLeftBar from './Elements/Topbar/Topleft'
+import { blocksExitRoute } from './AI/utils/blocksHandoff'
 import TopBarRight from './Elements/Topbar/TopRightBar'
 import TopBarCenter from './Elements/Topbar/TopCenter'
 import Models, { AddBlocks } from './Models'
@@ -37,6 +38,9 @@ import { registerAIClassBlocks, registerPlaceholderAIBlocks } from '../blockly/s
 import { buildToolboxXml } from './toobox/toolboxBuilder'
 import "../blockly";
 import AIRunnerOverlay from './Blocks/components/AIRunnerOverlay';
+
+// Blockly User Manual (same PDF as the desktop app), served from /public.
+const BLOCKLY_MANUAL_URL = '/manuals/blockly-user-manual.pdf'
 declare global {
   interface Window {
     __aiLoadedModels?: Array<{
@@ -64,7 +68,7 @@ const BlocksPage: React.FC = () => {
 
   const [code, setCode] = useState('')
   const [output, setOutput] = useState('')
-  const [projectName, setProjectName] = useState('project 1')
+  const [projectName, setProjectName] = useState('Awesome Project 1')
   const [fileHandle, setFileHandle] = useState<FileSystemFileHandle | null>(null);
   const [unsavedChanges, setUnsavedChanges] = useState(true)
 
@@ -287,7 +291,7 @@ useEffect(() => {
         }
       >
            <div
-  className="absolute inset-0 z-10 animate-moving-bg bg-repeat bg-center bg-contain pointer-events-none opacity-30"
+  className="absolute inset-0 z-10 bg-repeat bg-center bg-contain pointer-events-none opacity-30"
   style={{ backgroundImage: `url(${BackgroundImg})` }}
 />
         <div className={`w-full h-screen flex flex-col pt-6 ${bgyellow}`}>
@@ -356,6 +360,7 @@ useEffect(() => {
                       router,
                       projectName,
                       selectedCategory: selectedCategory ?? "",
+                      exitTo: blocksExitRoute(),
                     });
                   }}
                 />
@@ -448,14 +453,14 @@ useEffect(() => {
         {showUnderDev && <UnderdevelopmentPopup onNo={() => setShowUnderDev(false)} />}
         {actions.showSavetokitpop && <Savetokitpop type={actions.popupType} />}
 
-        {/* {showPDF && (
+        {showPDF && (
           <Curriculum
-            pdfUrl={samplePdf}
+            pdfUrl={BLOCKLY_MANUAL_URL}
             position={pdfPosition}
             onClose={() => setShowPDF(false)}
             title="Blockly User Manual"
           />
-        )} */}
+        )}
 
       </DndContext>
     </>

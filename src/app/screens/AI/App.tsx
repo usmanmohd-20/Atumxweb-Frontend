@@ -20,6 +20,10 @@ import trainmodel from './icons/trainhand.gif'
 import trainsucessgif from './icons/readyhandgif.gif'
 import modelready from './icons/handpng.png'
 import { uniqueClassName } from './utils/uniqueClassName'
+import { DOTTED_BG, PANEL } from './utils/themeClasses'
+import { openProjectFile, projectNameFromFile } from './utils/projectFile'
+import { blocksUrlFrom, clearAiSnapshot, peekAiSnapshot, stashAiSnapshot } from './utils/blocksHandoff'
+import type { ModelBundle } from './utils/modelIO'
 type Page = 'main' | 'blocky' | 'predict'
 
 const DEFAULT_CLASS_COLORS = ['#a3e635', '#f472b6', '#a78bfa', '#60a5fa', '#fb923c', '#34d399', '#f87171', '#fbbf24']
@@ -42,12 +46,15 @@ export default function AIApp() {
   const [images, setImages] = useState<Record<string, string[]>>({})
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null)
   const [classColors, setClassColors] = useState<Record<string, string>>({})
+  // Classes are enabled by default; disabled ones are skipped for capture and training.
+  const [disabledClassIds, setDisabledClassIds] = useState<Set<string>>(() => new Set())
   const [, setThumbOffset] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [projectDesc, setProjectDesc] = useState('')
   const [showProjectPopup, setShowProjectPopup] = useState(false)
   const classIdCounter = useRef(0)
+  const defaultClassesAddedRef = useRef(false)
   const manualCaptureRef = useRef<{ classId: string } | null>(null)
   const latestRef = useRef<LatestRef | null>(null)
   const handTrackerRef = useRef<HandTrackerHandle>(null)
@@ -98,6 +105,12 @@ export default function AIApp() {
   const selectedColor = selectedClassId
     ? (classColors[selectedClassId] ?? DEFAULT_CLASS_COLORS[classes.findIndex((c) => c.id === selectedClassId) % DEFAULT_CLASS_COLORS.length])
     : '#a3e635'
+  const enabledClasses = classes.filter((c) => !disabledClassIds.has(c.id))
+  // Colours keyed by id so the controls/predict panels keep each class's colour
+  // even though they only list the enabled classes.
+  const resolvedClassColors = Object.fromEntries(
+    classes.map((c, i) => [c.id, classColors[c.id] ?? DEFAULT_CLASS_COLORS[i % DEFAULT_CLASS_COLORS.length]]),
+  )
 
   function addImage(classId: string, imageUrl: string) {
     setImages((prev) => ({ ...prev, [classId]: [...(prev[classId] ?? []), imageUrl] }))
@@ -117,8 +130,29 @@ export default function AIApp() {
     setClasses((prev) => prev.filter((c) => c.id !== id))
     setImages((prev) => { const n = { ...prev }; delete n[id]; return n })
     setClassColors((prev) => { const n = { ...prev }; delete n[id]; return n })
+    setDisabledClassIds((prev) => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n })
     if (manualCaptureRef.current?.classId === id) manualCaptureRef.current = null
     if (selectedClassId === id) { setSelectedClassId(null); setThumbOffset(0) }
+  }
+
+  function handleToggleClassEnabled(id: string) {
+    const disabling = !disabledClassIds.has(id)
+    setDisabledClassIds((prev) => {
+      const n = new Set(prev)
+      if (disabling) n.add(id)
+      else n.delete(id)
+      return n
+    })
+    if (!disabling) return
+    // A disabled class can't receive samples: stop any recording into it and
+    // move the selection to the next enabled class.
+    if (manualCaptureRef.current?.classId === id) manualCaptureRef.current = null
+    if (selectedClassId === id) {
+      if (isCapturing || countdown !== null) recorder.stop()
+      const next = classes.find((c) => c.id !== id && !disabledClassIds.has(c.id))
+      setSelectedClassId(next?.id ?? null)
+      setThumbOffset(0)
+    }
   }
 
   function handleRenameClass(id: string, name: string) {
@@ -170,6 +204,7 @@ export default function AIApp() {
   }
 
   function handleSelectClass(id: string) {
+    if (disabledClassIds.has(id)) return
     setSelectedClassId(id)
     setThumbOffset(0)
   }
@@ -213,13 +248,14 @@ export default function AIApp() {
     setPrediction(null)
     setImages({})
     setClassColors({})
+    setDisabledClassIds(new Set())
     classIdCounter.current = 0
     const id1 = `cls_${++classIdCounter.current}`
     const id2 = `cls_${++classIdCounter.current}`
     target.initClass(id1); target.initClass(id2)
     setClasses([{ id: id1, name: 'Class 1' }, { id: id2, name: 'Class 2' }])
     setSelectedClassId(id1)
-    setInputMode('camera')
+    // keep whatever input (camera / upload / none) the user already picked
   }
 
   function toggleFullscreen() {
@@ -235,13 +271,27 @@ export default function AIApp() {
     else if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {})
   }
 
+  // Start with Class 1 selected. The camera is NOT opened automatically — the
+  // user picks camera or upload from a class card first.
   useEffect(() => {
-    handleAddClass('Class 1')
-    handleAddClass('Class 2')
-    // handleAddClass selects each class as it's added, so Class 2 ends up selected.
-    // Select Class 1 (the first id) and auto-load the camera — matching 2-hand.
-    setSelectedClassId('cls_1')
-    setInputMode('camera')
+    // Coming back from Blocks: restore the project that was open instead.
+    const snap = peekAiSnapshot('/ai')
+    if (snap) {
+      restoreBundle(JSON.parse(snap.json) as ModelBundle, snap.projectName, snap.colorsByName)
+        .then(() => clearAiSnapshot('/ai'))
+        .catch((err) => console.error('Failed to restore project after Blocks:', err))
+      return
+    }
+    // Replace the list rather than appending: React Strict Mode runs this twice in
+    // dev, and appending turned "Class 1, Class 2" into four cards.
+    classIdCounter.current = 0
+    const initial = ['Class 1', 'Class 2'].map((name) => {
+      const id = `cls_${++classIdCounter.current}`
+      classifier.initClass(id)
+      return { id, name }
+    })
+    setClasses(initial)
+    setSelectedClassId(initial[0].id)
   }, [])
 
   useEffect(() => {
@@ -256,11 +306,20 @@ export default function AIApp() {
         await classifier.saveModel(projectName || 'gesture-model')
       }
       await classifier.exportToBlockly(projectName || 'gesture-model')
-      router.push('/blocks')
+      // Snapshot the project so Blocks' back button returns to it intact.
+      const bundle = await classifier.serializeProject(images)
+      if (bundle) {
+        stashAiSnapshot('/ai', {
+          json: JSON.stringify(bundle),
+          projectName,
+          colorsByName: Object.fromEntries(classes.filter((c) => classColors[c.id]).map((c) => [c.name, classColors[c.id]])),
+        })
+      }
+      router.push(blocksUrlFrom('/ai'))
     } catch (err) {
       console.error('Failed to export gesture model to Blockly:', err)
     }
-  }, [classifier, projectName, router])
+  }, [classifier, projectName, router, images, classes, classColors])
 
   latestRef.current = { classifier, setPrediction, addImage, recorder }
 
@@ -326,7 +385,9 @@ export default function AIApp() {
     }
   }, [])
 
-  const handleTrain = useCallback(() => { classifier.trainModel(classes) }, [classes, classifier])
+  const handleTrain = useCallback(() => {
+    classifier.trainModel(classes.filter((c) => !disabledClassIds.has(c.id)))
+  }, [classes, disabledClassIds, classifier])
   const handleReset = useCallback(() => { classifier.resetModel(); setPrediction(null) }, [classifier])
 
   const handleCreateProject = (name: string, desc: string) => {
@@ -337,23 +398,51 @@ export default function AIApp() {
     setClasses([])
     setImages({})
     setClassColors({})
+    setDisabledClassIds(new Set())
     setSelectedClassId(null)
     classIdCounter.current = 0
   }
 
+  // A saved bundle doesn't record its hand mode, but its vectors do: 63 values per
+  // sample for one hand, 126 for two. Fall back to the model's input width.
+  function bundleHandMode(bundle: ModelBundle): 1 | 2 | null {
+    const firstSample = Object.values(bundle.samples ?? {}).find((s) => s.length > 0)?.[0]
+    const dim = firstSample?.length
+      ?? Number(JSON.stringify(bundle.modelTopology).match(/"batch_input_shape":\[null,(\d+)\]/)?.[1])
+    if (dim === classifierTwo.featureDim) return 2
+    if (dim === classifierSingle.featureDim) return 1
+    return null
+  }
+
+  /** Load a project bundle into the page (Open, and the return trip from Blocks). */
+  async function restoreBundle(bundle: ModelBundle, name: string, colorsByName?: Record<string, string>) {
+    const mode = bundleHandMode(bundle) ?? handMode
+    const target = mode === 2 ? classifierTwo : classifierSingle
+    if (mode !== handMode) {
+      // Switch to the file's hand mode; the other classifier is left empty.
+      stopCountdownRecord()
+      const other = mode === 2 ? classifierSingle : classifierTwo
+      other.resetModel(); other.clearSamples()
+      setHandMode(mode)
+    }
+    const restoredClasses = await target.loadModel(bundle)
+    classIdCounter.current = restoredClasses.length
+    setClasses(restoredClasses)
+    setImages(target.restoreImages(bundle, restoredClasses))
+    setClassColors(Object.fromEntries(
+      restoredClasses.filter((c) => colorsByName?.[c.name]).map((c) => [c.id, colorsByName![c.name]])
+    ))
+    setDisabledClassIds(new Set())
+    setPrediction(null)
+    setProjectName(name)
+    setSelectedClassId(restoredClasses[0]?.id ?? null)
+  }
+
   const handleOpenProject = async () => {
     try {
-      const res = await (window as any).api.file.open(handMode === 2 ? 'handGesture2H' : 'handGesture')
-      if (!res || !res.success) return
-      const bundle = JSON.parse(res.data)
-      const restoredClasses = await classifier.loadModel(bundle)
-      setClasses(restoredClasses)
-      setImages({})
-      setClassColors({})
-      setProjectName(res.fileName.replace('.json', ''))
-      if (restoredClasses.length > 0) {
-        setSelectedClassId(restoredClasses[0].id)
-      }
+      const res = await openProjectFile(handMode === 2 ? 'handGesture2H' : 'handGesture')
+      if (!res.success || !res.data) return
+      await restoreBundle(JSON.parse(res.data) as ModelBundle, projectNameFromFile(res.fileName))
     } catch (err) {
       console.error('Failed to load project:', err)
       alert('Failed to load project: ' + (err instanceof Error ? err.message : String(err)))
@@ -382,8 +471,8 @@ export default function AIApp() {
 
   if (page === 'predict') return (
     <PredictPage
-      classes={classes}
-      classColors={classColors}
+      classes={enabledClasses}
+      classColors={resolvedClassColors}
       defaultColors={DEFAULT_CLASS_COLORS}
       prediction={prediction}
       predict={classifier.predict}
@@ -414,6 +503,9 @@ export default function AIApp() {
         onProjectNameChange={setProjectName}
         onNewProject={() => setShowProjectPopup(true)}
         onOpenProject={handleOpenProject}
+        useBookIcon
+        centerProjectName
+        backIconSrc="/icons/misc/gesture_dark.svg"
       />
 {trainingPopup && (
   <div
@@ -479,32 +571,13 @@ export default function AIApp() {
 )}
 </div></div>)}
       <main
-        className="flex-1 flex relative z-20 justify-center items-center gap-6 p-6 overflow-hidden"
-        style={{
-          backgroundColor: '#efefef',
-          backgroundImage: 'radial-gradient(circle, #c0c0c0 1.5px, transparent 1.5px)',
-          backgroundSize: '20px 20px',
-        }}
+        className={`flex-1 flex relative z-20 justify-center items-center gap-6 p-6 overflow-hidden ${DOTTED_BG}`}
       >
         {/* Left: camera panel*/}
         <div className="flex justify-center items-center w-[clamp(320px,30vw,480px)] shrink-0 mx-auto">
           <div className="w-[clamp(320px,30vw,480px)] flex flex-col">
 
             {!showSettings ? (<>
-
-              {/* 1-hand / 2-hand toggle */}
-              <div className="w-[clamp(240px,21vw,340px)] flex mb-3 rounded-lg overflow-hidden border-2 border-black">
-                <button
-                  onClick={() => handleSetHandMode(1)}
-                  className={`flex-1 py-2 text-sm font-extrabold transition-colors ${handMode === 1 ? 'bg-black text-[#F6EC24]' : 'bg-[#F6EC24] text-black'}`}>
-                  ✋ 1 HAND
-                </button>
-                <button
-                  onClick={() => handleSetHandMode(2)}
-                  className={`flex-1 py-2 text-sm font-extrabold transition-colors ${handMode === 2 ? 'bg-black text-[#F6EC24]' : 'bg-[#F6EC24] text-black'}`}>
-                  🙌 2 HANDS
-                </button>
-              </div>
 
               {/*Class Label*/}
               <div
@@ -515,7 +588,7 @@ export default function AIApp() {
 
               {/* Camera Card */}
               <div
-                className="w-full bg-white border-2 border-black rounded-tr-xl rounded-br-xl rounded-bl-xl p-3">
+                className={`w-full ${PANEL} border-2 border-black rounded-tr-xl rounded-br-xl rounded-bl-xl p-3`}>
                 {/* Video / Upload zone */}
                 <div
                   ref={camStageRef}
@@ -538,6 +611,13 @@ export default function AIApp() {
                       idle={!isCapturing}
                       onLightingWarn={setLightingWarnActive}
                     />
+                  ) : inputMode === null ? (
+                    // Nothing chosen yet — ask for camera or upload (via the class card buttons)
+                    <div className="w-full h-full bg-[#F6EC24] flex items-center justify-center select-none">
+                      <span className="font-bold text-center text-black leading-tight">
+                        Select camera or<br />upload files.
+                      </span>
+                    </div>
                   ) : (
                     <div
                       onClick={() => fileInputRef.current?.click()}
@@ -648,7 +728,7 @@ export default function AIApp() {
             </>
 
             ) : (<>
-              <div className="w-full min-h-[19vw] bg-white border-2 border-black rounded-xl p-4 flex flex-col">
+              <div className={`w-full min-h-[19vw] ${PANEL} border-2 border-black rounded-xl p-4 flex flex-col`}>
 
                 <RecordingSettings
                   fps={fps}
@@ -723,6 +803,8 @@ export default function AIApp() {
                       mode={hold ? 'hold' : 'auto'}
                       onModeChange={(m) => setHold(m === 'hold')}
                       showModeSwitch={!(isCapturing || countdown !== null)}
+                      handMode={handMode}
+                      onHandModeChange={isCapturing || countdown !== null ? undefined : handleSetHandMode}
                       onOpenSettings={() => setShowSettings(true)}
                     />
                   )}
@@ -757,6 +839,8 @@ export default function AIApp() {
             selectedClassId={selectedClassId}
             classColors={classColors}
             defaultColors={DEFAULT_CLASS_COLORS}
+            disabledClassIds={disabledClassIds}
+            onToggleClassEnabled={handleToggleClassEnabled}
             onAddClass={handleAddClass}
             onDeleteClass={handleDeleteClass}
             onRenameClass={handleRenameClass}
@@ -767,11 +851,13 @@ export default function AIApp() {
             onSelectClass={handleSelectClass}
             onChangeColor={handleChangeColor}
             onActivateCamera={(id) => {
+              if (disabledClassIds.has(id)) return
               handleSelectClass(id)
               if (isCapturing) stopCapture()
               setInputMode('camera')
             }}
             onActivateUpload={(id) => { // upload
+              if (disabledClassIds.has(id)) return
               handleSelectClass(id)
               if (isCapturing) stopCapture()
               setInputMode('upload')
@@ -785,8 +871,8 @@ export default function AIApp() {
         {/* ── Right: controls panel ──────────────────────────────────── */}
         <div className="w-[clamp(320px,30vw,480px)] shrink-0 mx-auto">
           <ControlsPanel
-            classes={classes}
-            classColors={classColors}
+            classes={enabledClasses}
+            classColors={resolvedClassColors}
             defaultColors={DEFAULT_CLASS_COLORS}
             onStart={() => setPage('predict')}
             onExportToBlockly={handleExportToBlockly}

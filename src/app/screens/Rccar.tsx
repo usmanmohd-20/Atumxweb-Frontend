@@ -1,5 +1,6 @@
+"use client";
 import { useState, useEffect, useRef,useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useRouter } from 'next/navigation'
 import { useDispatch,useSelector } from 'react-redux'
 import Back from './../components/ui/Controlback'
 import Kits from '../assets/Kits';
@@ -22,7 +23,7 @@ import SettingModal from '../components/supporting/SettingModal';
 
 
 const Rccar = () => {
-  const navigate = useNavigate()
+  const router = useRouter()
   const { isConnected, mode,status } = useSelector((state: RootState) => state.websocketSlice);
   const dispatch = useDispatch<AppDispatch>()
   const [openIndex, setOpenIndex] = useState<number | null>(null)
@@ -275,14 +276,14 @@ const dropdownValues = useMemo(() => {
     {/* Top Bar */}
     
       <div className={`fixed top-0 left-0 w-full h-25 bg-[#FFDE21] px-4 ${bgyellow}`}>
-      <div className="absolute inset-0 z-10 animate-moving-bg bg-repeat bg-center bg-[length:700px] pointer-events-none opacity-30"
+      <div className="absolute inset-0 z-10 bg-repeat bg-center bg-[length:700px] pointer-events-none opacity-30"
   style={{ backgroundImage: `url(${BackgroundImg})` }}
 />
 <div className="relative z-10 flex items-center h-full mt-2">
     
     {/* LEFT */}
     <div className="flex items-center">
-      <button onClick={() => navigate('/blocks')} className="group relative hover:scale-110 transition-transform duration-200">
+      <button onClick={() => router.push('/blocks')} className="group relative hover:scale-110 transition-transform duration-200">
         <Back className="w-[60px] h-[60px]" />
         <Tooltip text="Back" />
       </button>
